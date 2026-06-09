@@ -1,0 +1,4 @@
+{
+  "python.defaultInterpreterPath": "/home/adriandv/miniconda3/envs/deep-learning/bin/python",
+  "python.condaPath": "/home/adriandv/miniconda3/bin/conda"
+}

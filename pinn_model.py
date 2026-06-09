@@ -1,6 +1,8 @@
 import os
 import math
 import time
+import logging
+from datetime import datetime
 from typing import Dict
 
 import numpy as np
@@ -12,6 +14,37 @@ import torch.nn as nn
 
 import config as cfg
 from data_utils import get_training_data
+
+
+def setup_logger(log_dir: str = 'logs') -> logging.Logger:
+    """Create a logger that writes to both console and a timestamped file."""
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_file = os.path.join(log_dir, f'train_{timestamp}.log')
+
+    logger = logging.getLogger('pinn')
+    logger.setLevel(logging.DEBUG)
+    # avoid duplicate handlers on re-import
+    if logger.handlers:
+        logger.handlers.clear()
+
+    fmt = logging.Formatter('%(asctime)s | %(message)s', datefmt='%H:%M:%S')
+
+    fh = logging.FileHandler(log_file, encoding='utf-8')
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(fmt)
+    logger.addHandler(ch)
+
+    logger.info(f'Log file: {os.path.abspath(log_file)}')
+    return logger
+
+
+log = setup_logger()
 
 
 class LeakPINN(nn.Module):
@@ -33,12 +66,11 @@ class LeakPINN(nn.Module):
         self.net = nn.Sequential(*layers)
 
         # trainable leak params (raw, unconstrained)
-        # initialize so that x_leak ~ L/2 and q_leak ~ 0.008
-        self.x_leak_raw = nn.Parameter(torch.tensor(0.0))
-        q_target = 0.008
-        # inverse softplus: raw = log(exp(y)-1)
-        q_raw_init = float(math.log(math.exp((q_target - 0.001) / 0.01) - 1.0))
-        self.q_leak_raw = nn.Parameter(torch.tensor(q_raw_init))
+        # initialize x_leak ~ L/2 (center of domain)
+        self.x_leak_raw = nn.Parameter(torch.tensor(0.0))  # sigmoid(0) = 0.5 → 5000 m
+        # initialize q_leak ~ midpoint of expected range [0.001, 0.050]
+        # sigmoid(0) = 0.5 → 0.5 * 0.049 + 0.001 = 0.0255 m³/s
+        self.q_leak_raw = nn.Parameter(torch.tensor(0.0))
 
         # initialize weights with Xavier uniform
         for m in self.net:
@@ -54,8 +86,9 @@ class LeakPINN(nn.Module):
 
     @property
     def q_leak(self) -> float:
-        # softplus to ensure positive, then scale
-        return nn.functional.softplus(self.q_leak_raw) * 0.01 + 0.001
+        # sigmoid -> [0,1] then scale to [0.001, 0.050]
+        # symmetric gradient around raw=0, no vanishing gradient trap
+        return torch.sigmoid(self.q_leak_raw) * 0.049 + 0.001
 
     def network_params(self):
         # Return all parameters except the trainable leak scalars.
@@ -106,7 +139,10 @@ def compute_pde_residuals(model: LeakPINN, x_col: torch.Tensor, t_col: torch.Ten
     a = float(cfg.WAVE_SPEED)
     A = math.pi * cfg.PIPE_DIAMETER ** 2 / 4.0
 
-    S = leak_source(x_col, t_col, model.x_leak, model.q_leak)
+    # CRITICAL: detach q_leak so PDE residual does NOT push q_leak → 0.
+    # q_leak receives gradients ONLY from L_masa (mass balance).
+    # x_leak keeps gradients from PDE (spatial location is informed by physics).
+    S = leak_source(x_col, t_col, model.x_leak, model.q_leak.detach())
 
     r_cont = dP_dt + (rho * a * a / A) * dQ_dx + (rho * a * a / A) * S
 
@@ -121,16 +157,16 @@ def compute_pde_residuals(model: LeakPINN, x_col: torch.Tensor, t_col: torch.Ten
 
 
 def compute_loss(model: LeakPINN, data_dict: Dict, x_col: torch.Tensor, t_col: torch.Tensor, lambdas: Dict):
-    # Now accept pre-moved tensors inside data_dict to avoid allocations.
     device = x_col.device
     mse = nn.MSELoss()
 
-    # data tensors moved to device in train_pinn
     t = data_dict['t_tensor']
     P_noisy_tensor = data_dict['P_noisy_tensor']
     x_sensors = data_dict['x_sensors_tensor']
+    P_inlet = data_dict['P_INLET_t']
+    Q_outlet = data_dict['Q_OUTLET_t']
 
-    # Data loss (only pressure sensors)
+    # Data loss (pressure only at sensors) - normalized by P_inlet
     L_datos = torch.tensor(0.0, device=device)
     Nt = t.shape[0]
     for i in range(x_sensors.shape[0]):
@@ -138,30 +174,43 @@ def compute_loss(model: LeakPINN, data_dict: Dict, x_col: torch.Tensor, t_col: t
         x_tensor = torch.full((Nt,), x_val, dtype=torch.float32, device=device)
         P_pred, _ = model(x_tensor, t)
         P_target = P_noisy_tensor[i]
-        L_datos = L_datos + mse(P_pred, P_target)
+        L_datos = L_datos + mse(P_pred / P_inlet, P_target / P_inlet)
     L_datos = L_datos / float(x_sensors.shape[0])
 
     # PDE residual loss
     r_cont, r_mom = compute_pde_residuals(model, x_col, t_col)
-    r_cont_norm = r_cont / data_dict['P_INLET_t']
-    r_mom_norm = r_mom / (data_dict['Q_OUTLET_t'] * data_dict['RHO_t'])
+    r_cont_norm = r_cont / P_inlet
+    r_mom_norm = r_mom / (Q_outlet * data_dict['RHO_t'])
     L_fisica = torch.mean(r_cont_norm ** 2) + torch.mean(r_mom_norm ** 2)
 
-    # Boundary conditions (use preallocated tensors)
+    # Boundary conditions - normalized
     P_x0, _ = model(data_dict['x0_bc'], data_dict['t_bc'])
     _, Q_xL = model(data_dict['xL_bc'], data_dict['t_bc'])
-    L_contorno = mse(P_x0, data_dict['P_INLET_t'].expand_as(P_x0)) + mse(Q_xL, data_dict['Q_OUTLET_t'].expand_as(Q_xL))
+    L_contorno = mse(P_x0 / P_inlet, torch.ones_like(P_x0)) + mse(Q_xL / Q_outlet, torch.ones_like(Q_xL))
 
-    # Initial conditions
+    # Initial conditions - normalized
     P_pred_ic, Q_pred_ic = model(data_dict['x_ic'], data_dict['t0_ic'])
     P_ss_x = data_dict['P_ss_x']
-    L_inicial = mse(P_pred_ic, P_ss_x) + mse(Q_pred_ic, data_dict['Q_OUTLET_t'].expand_as(Q_pred_ic))
+    L_inicial = mse(P_pred_ic / P_inlet, P_ss_x / P_inlet) + mse(Q_pred_ic / Q_outlet, torch.ones_like(Q_pred_ic))
+
+    # Global mass balance constraint (derived from physics, not data)
+    # In quasi-steady state (t >> t_leak): Q(0,t) - Q(L,t) = q_leak
+    # This couples the network's Q field to q_leak without external Q measurements
+    t_late = data_dict['t_mass_balance']
+    x0_mb = torch.zeros_like(t_late)
+    xL_mb = torch.full_like(t_late, float(model.L))
+    _, Q_inlet_late = model(x0_mb, t_late)
+    _, Q_outlet_late = model(xL_mb, t_late)
+    delta_Q = (Q_inlet_late - Q_outlet_late) / Q_outlet
+    q_leak_norm = model.q_leak / Q_outlet
+    L_masa = mse(delta_Q, q_leak_norm.expand_as(delta_Q))
 
     L_total = (
         lambdas['data'] * L_datos
         + lambdas['pde'] * L_fisica
         + lambdas['bc'] * L_contorno
         + lambdas['ic'] * L_inicial
+        + lambdas['mass'] * L_masa
     )
 
     components = {
@@ -170,8 +219,16 @@ def compute_loss(model: LeakPINN, data_dict: Dict, x_col: torch.Tensor, t_col: t
         'L_fisica': float(L_fisica.detach().cpu().item()),
         'L_contorno': float(L_contorno.detach().cpu().item()),
         'L_inicial': float(L_inicial.detach().cpu().item()),
+        'L_masa': float(L_masa.detach().cpu().item()),
     }
-    return L_total, components
+    tensors = {
+        'L_datos': L_datos,
+        'L_fisica': L_fisica,
+        'L_contorno': L_contorno,
+        'L_inicial': L_inicial,
+        'L_masa': L_masa,
+    }
+    return L_total, components, tensors
 
 
 def train_pinn(scenario_id=7,
@@ -182,9 +239,11 @@ def train_pinn(scenario_id=7,
                lr=1e-3,
                lambdas=None,
                verbose=True,
-               progress_every=500):
+               progress_every=500,
+               use_lbfgs=True,
+               lbfgs_epochs=2000):
     if lambdas is None:
-        lambdas = {"data": 10.0, "pde": 1.0, "bc": 5.0, "ic": 5.0}
+        lambdas = {"data": 10.0, "pde": 1.0, "bc": 1.0, "ic": 1.0, "mass": 5.0}
 
     torch.set_float32_matmul_precision('high')
 
@@ -213,18 +272,35 @@ def train_pinn(scenario_id=7,
         else:
             n_collocation = 8_000
 
-    print(f"PyTorch version: {torch.__version__}")
-    print(f"torch.compile available: {hasattr(torch, 'compile')}")
-    print(f"Device: {device}")
+    log.info(f"PyTorch version: {torch.__version__}")
+    log.info(f"torch.compile available: {hasattr(torch, 'compile')}")
+    log.info(f"Device: {device}")
     if device.type == 'cuda':
         try:
-            print(f"GPU: {torch.cuda.get_device_name(0)}")
-            print(f"VRAM total: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+            log.info(f"GPU: {torch.cuda.get_device_name(0)}")
+            log.info(f"VRAM total: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
         except Exception:
             pass
 
+    # Log hyperparameters
+    log.info(f"Scenario: {scenario_id} | Noise: {noise_level} | Sensors: {n_sensors}")
+    log.info(f"Lambdas: {lambdas}")
+    log.info(f"LR: {lr} | Collocation: {n_collocation:,} | Epochs: {n_epochs}")
+
+    # Determine epochs for Adam and L-BFGS
+    if use_lbfgs:
+        if n_epochs <= 200:
+            actual_lbfgs_epochs = n_epochs // 5
+            actual_adam_epochs = n_epochs - actual_lbfgs_epochs
+        else:
+            actual_lbfgs_epochs = lbfgs_epochs
+            actual_adam_epochs = max(0, n_epochs - actual_lbfgs_epochs)
+    else:
+        actual_adam_epochs = n_epochs
+        actual_lbfgs_epochs = 0
+
     if verbose:
-        print(f"Training start: {n_epochs} epochs, {n_collocation:,} collocation points, reporting every {progress_every} epochs")
+        log.info(f"Training start: {actual_adam_epochs} Adam epochs + {actual_lbfgs_epochs} L-BFGS epochs, {n_collocation:,} collocation points")
 
     model = LeakPINN().to(device)
 
@@ -235,7 +311,7 @@ def train_pinn(scenario_id=7,
         {'params': [model.q_leak_raw], 'lr': 5e-3},
     ])
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=1e-5)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, actual_adam_epochs), eta_min=1e-5)
 
     history = []
 
@@ -256,6 +332,10 @@ def train_pinn(scenario_id=7,
 
     x_ic = torch.linspace(0.0, float(cfg.PIPE_LENGTH), Nic, dtype=torch.float32, device=device)
     t0_ic = torch.zeros_like(x_ic, device=device)
+
+    # Mass balance: sample late-time points (t > 0.75 * T_total, well after leak onset)
+    N_mass = 100
+    t_mass_balance = torch.linspace(0.75 * float(cfg.T_TOTAL), float(cfg.T_TOTAL), N_mass, dtype=torch.float32, device=device)
 
     # steady state analytical on device
     A = math.pi * cfg.PIPE_DIAMETER ** 2 / 4.0
@@ -279,6 +359,7 @@ def train_pinn(scenario_id=7,
         'x_ic': x_ic,
         't0_ic': t0_ic,
         'P_ss_x': P_ss_x,
+        't_mass_balance': t_mass_balance,
     }
 
     # Preallocate collocation tensors on device and reuse (in-place randomize)
@@ -288,7 +369,8 @@ def train_pinn(scenario_id=7,
     t_start_total = time.time()
     t_epoch_start = time.time()
 
-    for epoch in range(1, n_epochs + 1):
+    # Phase 1: Adam optimization
+    for epoch in range(1, actual_adam_epochs + 1):
         if torch.cuda.is_available() and hasattr(torch, 'compiler') and hasattr(torch.compiler, 'cudagraph_mark_step_begin'):
             torch.compiler.cudagraph_mark_step_begin()
 
@@ -301,10 +383,48 @@ def train_pinn(scenario_id=7,
         t_col.requires_grad_()
 
         optimizer.zero_grad()
-        loss_total, comps = compute_loss(model, {**device_data}, x_col, t_col, lambdas)
-        loss_total.backward()
+        loss_total, comps, comps_tensors = compute_loss(model, {**device_data}, x_col, t_col, lambdas)
+        
+        # Analyze gradients of L_datos vs L_fisica in first epochs to detect imbalance
+        if epoch <= 5:
+            # 1. Gradient of weighted L_datos
+            optimizer.zero_grad()
+            (lambdas['data'] * comps_tensors['L_datos']).backward(retain_graph=True)
+            grad_data_norm = 0.0
+            for p in model.network_params():
+                if p.grad is not None:
+                    grad_data_norm += p.grad.norm().item() ** 2
+            grad_data_norm = grad_data_norm ** 0.5
+
+            # 2. Gradient of weighted L_fisica
+            optimizer.zero_grad()
+            (lambdas['pde'] * comps_tensors['L_fisica']).backward(retain_graph=True)
+            grad_pde_norm = 0.0
+            for p in model.network_params():
+                if p.grad is not None:
+                    grad_pde_norm += p.grad.norm().item() ** 2
+            grad_pde_norm = grad_pde_norm ** 0.5
+            
+            if grad_data_norm > 10.0 * grad_pde_norm and epoch == 1:
+                log.warning(f"Epoch {epoch}: Grad L_data ({grad_data_norm:.3e}) >> Grad L_pde ({grad_pde_norm:.3e})")
+                log.warning("Esto puede causar que la red ignore la física y apague la fuga (q_leak ~ 0).")
+                log.warning("Sugerencia: λ_pde = λ_pde * (grad_data_norm / (grad_pde_norm + 1e-8))")
+                
+            # Reset gradients and do backward for L_total
+            optimizer.zero_grad()
+            loss_total.backward()
+        else:
+            loss_total.backward()
+
         optimizer.step()
         scheduler.step()
+
+        # Multi-step lr decay for x_leak: converges fast, then gets dragged
+        # by PDE co-adaptation. Decay at 10% and 25% of training.
+        if epoch == actual_adam_epochs // 10 or epoch == actual_adam_epochs // 4:
+            old_lr = optimizer.param_groups[1]['lr']
+            optimizer.param_groups[1]['lr'] *= 0.1
+            log.info(f"  >> x_leak lr decay: {old_lr:.1e} → {optimizer.param_groups[1]['lr']:.1e}")
 
         if epoch % 10 == 0:
             history.append({
@@ -314,31 +434,34 @@ def train_pinn(scenario_id=7,
                 'L_fisica': comps['L_fisica'],
                 'L_contorno': comps['L_contorno'],
                 'L_inicial': comps['L_inicial'],
+                'L_masa': comps['L_masa'],
                 'x_leak_pred': float(model.x_leak.detach().cpu().numpy()),
                 'q_leak_pred': float(model.q_leak.detach().cpu().numpy()),
             })
 
         if epoch == 1000 and verbose:
-            print("─── Balance de loss en epoch 1000 ───")
-            print(f"  L_datos    × λ_data = {comps['L_datos'] * lambdas['data']:.3e}")
-            print(f"  L_fisica   × λ_pde  = {comps['L_fisica'] * lambdas['pde']:.3e}")
-            print(f"  L_contorno × λ_bc   = {comps['L_contorno'] * lambdas['bc']:.3e}")
-            print(f"  L_inicial  × λ_ic   = {comps['L_inicial'] * lambdas['ic']:.3e}")
-            print("  → Los 4 valores deberían ser del mismo orden de magnitud")
-            print("────────────────────────────────────")
+            log.info("─── Balance de loss en epoch 1000 ───")
+            log.info(f"  L_datos    × λ_data = {comps['L_datos'] * lambdas['data']:.3e}")
+            log.info(f"  L_fisica   × λ_pde  = {comps['L_fisica'] * lambdas['pde']:.3e}")
+            log.info(f"  L_contorno × λ_bc   = {comps['L_contorno'] * lambdas['bc']:.3e}")
+            log.info(f"  L_inicial  × λ_ic   = {comps['L_inicial'] * lambdas['ic']:.3e}")
+            log.info(f"  L_masa     × λ_mass = {comps['L_masa'] * lambdas['mass']:.3e}")
+            log.info("  → Los 5 valores deberían ser del mismo orden de magnitud")
+            log.info("────────────────────────────────────")
 
-        if verbose and (epoch == 1 or epoch % progress_every == 0 or epoch == n_epochs):
+        if verbose and (epoch == 1 or epoch % progress_every == 0 or epoch == actual_adam_epochs):
             elapsed = time.time() - t_start_total
             recent_epochs = progress_every if epoch >= progress_every else epoch
             epoch_ms = (time.time() - t_epoch_start) / float(recent_epochs) * 1000.0
             vram_used = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
-            print(
-                f"Epoch {epoch:5d} | "
+            log.info(
+                f"Epoch {epoch:5d} (Adam) | "
                 f"L_total: {comps['L_total']:.3e} | "
                 f"L_dat: {comps['L_datos']:.3e} | "
                 f"L_fis: {comps['L_fisica']:.3e} | "
                 f"L_bc: {comps['L_contorno']:.3e} | "
                 f"L_ic: {comps['L_inicial']:.3e} | "
+                f"L_mass: {comps['L_masa']:.3e} | "
                 f"x_leak: {model.x_leak.item():.0f}m | "
                 f"q_leak: {model.q_leak.item():.5f} | "
                 f"{epoch_ms:.1f} ms/epoch | VRAM: {vram_used:.2f}GB | Elapsed: {elapsed/60:.1f} min"
@@ -358,6 +481,108 @@ def train_pinn(scenario_id=7,
             }
             torch.save(ckpt, os.path.join('checkpoints', f'pinn_epoch_{epoch}.pt'))
 
+    # Phase 2: L-BFGS Refinement
+    total_epochs_run = actual_adam_epochs
+    if use_lbfgs and actual_lbfgs_epochs > 0:
+        log.info(f"─── Fase L-BFGS: Refinamiento ({actual_lbfgs_epochs} iteraciones máx) ───")
+        
+        # Freeze collocation points for deterministic landscape in L-BFGS
+        torch.manual_seed(42 + int(cfg.RANDOM_SEED))
+        with torch.no_grad():
+            x_col_fixed = torch.empty(n_collocation, dtype=torch.float32, device=device)
+            t_col_fixed = torch.empty(n_collocation, dtype=torch.float32, device=device)
+            x_col_fixed.uniform_(0.0, float(cfg.PIPE_LENGTH))
+            t_col_fixed.uniform_(0.0, float(cfg.T_TOTAL))
+        x_col_fixed.requires_grad_()
+        t_col_fixed.requires_grad_()
+
+        # Instantiate L-BFGS optimizer for all model parameters
+        optimizer_lbfgs = torch.optim.LBFGS(
+            model.parameters(),
+            lr=1.0,
+            max_iter=1,  # 1 step per optimizer.step call to allow step-by-step monitoring/logging
+            line_search_fn="strong_wolfe"
+        )
+        
+        prev_loss = float('inf')
+        t_epoch_start = time.time()
+        
+        for step in range(1, actual_lbfgs_epochs + 1):
+            epoch_idx = actual_adam_epochs + step
+            total_epochs_run = epoch_idx
+            
+            comps_lbfgs = None
+            loss_val = None
+            
+            def closure():
+                nonlocal comps_lbfgs, loss_val
+                optimizer_lbfgs.zero_grad()
+                loss_total, comps, comps_tensors = compute_loss(model, device_data, x_col_fixed, t_col_fixed, lambdas)
+                loss_total.backward()
+                comps_lbfgs = comps
+                loss_val = loss_total.item()
+                return loss_total
+            
+            optimizer_lbfgs.step(closure)
+            
+            # Retrieve values after the step
+            l_val = loss_val if loss_val is not None else prev_loss
+            c_lbfgs = comps_lbfgs
+            
+            # Log progress
+            if c_lbfgs is not None:
+                # Add to history
+                if epoch_idx % 10 == 0:
+                    history.append({
+                        'epoch': epoch_idx,
+                        'loss_total': c_lbfgs['L_total'],
+                        'L_datos': c_lbfgs['L_datos'],
+                        'L_fisica': c_lbfgs['L_fisica'],
+                        'L_contorno': c_lbfgs['L_contorno'],
+                        'L_inicial': c_lbfgs['L_inicial'],
+                        'L_masa': c_lbfgs['L_masa'],
+                        'x_leak_pred': float(model.x_leak.detach().cpu().numpy()),
+                        'q_leak_pred': float(model.q_leak.detach().cpu().numpy()),
+                    })
+                
+                if verbose and (step == 1 or step % progress_every == 0 or step == actual_lbfgs_epochs):
+                    elapsed = time.time() - t_start_total
+                    recent_epochs = progress_every if step >= progress_every else step
+                    epoch_ms = (time.time() - t_epoch_start) / float(recent_epochs) * 1000.0
+                    vram_used = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+                    log.info(
+                        f"Epoch {epoch_idx:5d} (LBFGS) | "
+                        f"L_total: {c_lbfgs['L_total']:.3e} | "
+                        f"L_dat: {c_lbfgs['L_datos']:.3e} | "
+                        f"L_fis: {c_lbfgs['L_fisica']:.3e} | "
+                        f"L_bc: {c_lbfgs['L_contorno']:.3e} | "
+                        f"L_ic: {c_lbfgs['L_inicial']:.3e} | "
+                        f"L_mass: {c_lbfgs['L_masa']:.3e} | "
+                        f"x_leak: {model.x_leak.item():.0f}m | "
+                        f"q_leak: {model.q_leak.item():.5f} | "
+                        f"{epoch_ms:.1f} ms/epoch | VRAM: {vram_used:.2f}GB | Elapsed: {elapsed/60:.1f} min"
+                    )
+                    t_epoch_start = time.time()
+            
+            # Convergence check
+            if abs(prev_loss - l_val) < 1e-12:
+                log.info(f"L-BFGS converged at step {step} (change in loss < 1e-12). Stopping.")
+                break
+                
+            prev_loss = l_val
+            
+            # periodic checkpoint during L-BFGS
+            if epoch_idx % 2000 == 0:
+                ckpt = {
+                    'epoch': epoch_idx,
+                    'model_state': model.state_dict(),
+                    'optimizer_state': optimizer_lbfgs.state_dict(),
+                    'x_leak_pred': model.x_leak.item(),
+                    'q_leak_pred': model.q_leak.item(),
+                    'loss_total': l_val,
+                    'history': history,
+                }
+                torch.save(ckpt, os.path.join('checkpoints', f'pinn_epoch_{epoch_idx}.pt'))
 
     df = pd.DataFrame(history)
 
@@ -381,7 +606,7 @@ def train_pinn(scenario_id=7,
         'q_leak_error_pct': abs(q_pred - data['q_leak']) / (data['q_leak']) * 100.0,
         'peak_vram_gb': peak_vram,
         'training_time_s': total_time,
-        'ms_per_epoch': total_time / float(n_epochs) * 1000.0,
+        'ms_per_epoch': total_time / float(total_epochs_run) * 1000.0 if total_epochs_run > 0 else 0.0,
     }
     return result
 
@@ -437,9 +662,9 @@ def plot_training_diagnostics(train_result: Dict, save_dir: str = 'figs'):
         P_pred_flat, _ = model(x_flat, t_flat)
     P_pred = P_pred_flat.detach().cpu().numpy().reshape(len(t), len(x)).T
 
-    print(f"P_moc shape:  {P_moc.shape}")
-    print(f"P_pred shape: {P_pred.shape}")
-    print(f"Diferencia shape: {np.abs(P_moc - P_pred).shape}")
+    log.info(f"P_moc shape:  {P_moc.shape}")
+    log.info(f"P_pred shape: {P_pred.shape}")
+    log.info(f"Diferencia shape: {np.abs(P_moc - P_pred).shape}")
 
     fig, axs = plt.subplots(1, 3, figsize=(15, 4))
     vmin = np.min(P_moc)
@@ -474,15 +699,15 @@ def plot_training_diagnostics(train_result: Dict, save_dir: str = 'figs'):
     plt.close(fig)
 
     # Print summary
-    print('════════════════════════════════')
-    print('RESULTADO CASO BASE')
-    print(f"  x_leak real:  {train_result['x_leak_true']} m")
-    print(f"  x_leak pred:  {train_result['x_leak_pred']:.0f} m")
-    print(f"  Error:        {train_result['x_leak_error_km']:.3f} km")
-    print(f"  q_leak real:  {train_result['q_leak_true']:.4f} m³/s")
-    print(f"  q_leak pred:  {train_result['q_leak_pred']:.4f} m³/s")
-    print(f"  Error:        {train_result['q_leak_error_pct']:.2f} %")
-    print('════════════════════════════════')
+    log.info('════════════════════════════════')
+    log.info('RESULTADO CASO BASE')
+    log.info(f"  x_leak real:  {train_result['x_leak_true']} m")
+    log.info(f"  x_leak pred:  {train_result['x_leak_pred']:.0f} m")
+    log.info(f"  Error:        {train_result['x_leak_error_km']:.3f} km")
+    log.info(f"  q_leak real:  {train_result['q_leak_true']:.4f} m³/s")
+    log.info(f"  q_leak pred:  {train_result['q_leak_pred']:.4f} m³/s")
+    log.info(f"  Error:        {train_result['q_leak_error_pct']:.2f} %")
+    log.info('════════════════════════════════')
 
 
 def resume_training(checkpoint_path: str, n_epochs_extra: int = 5_000, **train_kwargs):
@@ -498,43 +723,62 @@ def resume_training(checkpoint_path: str, n_epochs_extra: int = 5_000, **train_k
 
 
 if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Train Leak PINN')
+    parser.add_argument('--scenario', type=int, default=8, help='Scenario ID (default: 8)')
+    parser.add_argument('--noise', type=str, default='trivial', help='Noise level (default: trivial)')
+    parser.add_argument('--n_sensors', type=int, default=3, help='Number of sensors: 2,3,5,11 (default: 3)')
+    parser.add_argument('--n_epochs', type=int, default=20000, help='Training epochs (default: 20000)')
+    parser.add_argument('--skip_benchmark', action='store_true', help='Skip the 100-epoch benchmark')
+    parser.add_argument('--no_lbfgs', action='store_true', help='Disable L-BFGS refinement')
+    parser.add_argument('--lbfgs_epochs', type=int, default=2000, help='L-BFGS refinement epochs (default: 2000)')
+    args = parser.parse_args()
+
     os.makedirs('checkpoints', exist_ok=True)
 
-    # quick benchmark
-    print('─── Benchmark rápido (100 epochs) ───')
-    t0 = time.time()
-    try:
-        _ = train_pinn(n_epochs=100, verbose=True, progress_every=20)
-        t_100 = time.time() - t0
-        print(f'100 epochs: {t_100:.2f}s')
-        print(f'Estimado para 20.000 epochs: {t_100 * 200:.1f} s (~{t_100 * 200 / 60:.1f} min)')
-    except torch.cuda.OutOfMemoryError:
-        print('OOM en benchmark. Saltando benchmark.')
+    if not args.skip_benchmark:
+        log.info('─── Benchmark rápido (100 epochs) ───')
+        t0 = time.time()
+        try:
+            _ = train_pinn(n_epochs=100, n_sensors=args.n_sensors, verbose=True, progress_every=20, use_lbfgs=False)
+            t_100 = time.time() - t0
+            log.info(f'100 epochs: {t_100:.2f}s')
+            log.info(f'Estimado para {args.n_epochs:,} epochs: {t_100 * args.n_epochs / 100:.1f} s (~{t_100 * args.n_epochs / 100 / 60:.1f} min)')
+        except torch.cuda.OutOfMemoryError:
+            log.error('OOM en benchmark. Saltando benchmark.')
 
     # Full training with OOM handling
     try:
-        print('─── Entrenamiento completo (20.000 epochs) ───')
+        log.info(f'─── Entrenamiento completo ({args.n_epochs:,} epochs, {args.n_sensors} sensores) ───')
         result = train_pinn(
-            scenario_id=8,
-            noise_level='trivial',
-            n_sensors=3,
-            n_epochs=20000,
+            scenario_id=args.scenario,
+            noise_level=args.noise,
+            n_sensors=args.n_sensors,
+            n_epochs=args.n_epochs,
             n_collocation=None,
             verbose=True,
             progress_every=500,
+            use_lbfgs=not args.no_lbfgs,
+            lbfgs_epochs=args.lbfgs_epochs,
         )
     except torch.cuda.OutOfMemoryError:
-        print('OOM en GPU. Reduciendo n_collocation a 10000 y reintentando...')
+        log.error('OOM en GPU. Reduciendo n_collocation a 10000 y reintentando...')
         torch.cuda.empty_cache()
         result = train_pinn(
-            scenario_id=8,
-            noise_level='trivial',
-            n_sensors=3,
-            n_epochs=20000,
+            scenario_id=args.scenario,
+            noise_level=args.noise,
+            n_sensors=args.n_sensors,
+            n_epochs=args.n_epochs,
             n_collocation=10000,
             verbose=True,
             progress_every=500,
+            use_lbfgs=not args.no_lbfgs,
+            lbfgs_epochs=args.lbfgs_epochs,
         )
 
     plot_training_diagnostics(result)
-    torch.save(result['model'].state_dict(), os.path.join('checkpoints', 'pinn_base.pt'))
+    ckpt_name = f'pinn_s{args.scenario}_n{args.n_sensors}_{args.noise}.pt'
+    torch.save(result['model'].state_dict(), os.path.join('checkpoints', ckpt_name))
+    log.info(f'Training complete. Model saved to checkpoints/{ckpt_name}')
+    log.info(f'Log saved. Check logs/ directory for full history.')
+

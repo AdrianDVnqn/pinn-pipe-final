@@ -1,0 +1,78 @@
+17:30:04 | Log file: /mnt/d/MCD_24-26/PROYECTO_FINAL_PINN/logs/train_20260609_173004.log
+17:30:04 | ─── Entrenamiento completo (20,000 epochs, 5 sensores) ───
+17:30:04 | PyTorch version: 2.5.1
+17:30:04 | torch.compile available: True
+17:30:04 | Device: cuda
+17:30:04 | GPU: NVIDIA GeForce RTX 3080
+17:30:04 | VRAM total: 12.9 GB
+17:30:04 | Scenario: 8 | Noise: trivial | Sensors: 5
+17:30:04 | Lambdas: {'data': 10.0, 'pde': 1.0, 'bc': 1.0, 'ic': 1.0, 'mass': 5.0}
+17:30:04 | LR: 0.001 | Collocation: 20,000 | Epochs: 20000
+17:30:04 | Training start: 18000 Adam epochs + 2000 L-BFGS epochs, 20,000 collocation points
+17:30:06 | Epoch 1: Grad L_data (9.964e+01) >> Grad L_pde (1.166e-03)
+17:30:06 | Esto puede causar que la red ignore la física y apague la fuga (q_leak ~ 0).
+17:30:06 | Sugerencia: λ_pde = λ_pde * (grad_data_norm / (grad_pde_norm + 1e-8))
+17:30:06 | Epoch     1 (Adam) | L_total: 1.919e+01 | L_dat: 1.494e+00 | L_fis: 1.171e-04 | L_bc: 2.124e+00 | L_ic: 1.976e+00 | L_mass: 2.866e-02 | x_leak: 5011m | q_leak: 0.02544 | 1270.5 ms/epoch | VRAM: 0.02GB | Elapsed: 0.0 min
+17:30:32 | Epoch   500 (Adam) | L_total: 5.050e-04 | L_dat: 1.930e-05 | L_fis: 8.492e-05 | L_bc: 7.347e-05 | L_ic: 1.270e-04 | L_mass: 5.330e-06 | x_leak: 5659m | q_leak: 0.02411 | 50.9 ms/epoch | VRAM: 0.02GB | Elapsed: 0.4 min
+17:30:57 | ─── Balance de loss en epoch 1000 ───
+17:30:57 |   L_datos    × λ_data = 1.442e-04
+17:30:57 |   L_fisica   × λ_pde  = 8.321e-05
+17:30:57 |   L_contorno × λ_bc   = 3.696e-05
+17:30:57 |   L_inicial  × λ_ic   = 7.018e-05
+17:30:57 |   L_masa     × λ_mass = 2.103e-05
+17:30:57 |   → Los 5 valores deberían ser del mismo orden de magnitud
+17:30:57 | ────────────────────────────────────
+17:30:57 | Epoch  1000 (Adam) | L_total: 3.556e-04 | L_dat: 1.442e-05 | L_fis: 8.321e-05 | L_bc: 3.696e-05 | L_ic: 7.018e-05 | L_mass: 4.207e-06 | x_leak: 5987m | q_leak: 0.02389 | 50.4 ms/epoch | VRAM: 0.02GB | Elapsed: 0.9 min
+17:31:20 | Epoch  1500 (Adam) | L_total: 2.797e-04 | L_dat: 1.112e-05 | L_fis: 8.807e-05 | L_bc: 2.210e-05 | L_ic: 4.229e-05 | L_mass: 3.197e-06 | x_leak: 6078m | q_leak: 0.02360 | 47.1 ms/epoch | VRAM: 0.02GB | Elapsed: 1.3 min
+17:31:35 |   >> x_leak lr decay: 4.9e-03 → 4.9e-04
+17:31:44 | Epoch  2000 (Adam) | L_total: 2.208e-04 | L_dat: 8.867e-06 | L_fis: 7.995e-05 | L_bc: 1.526e-05 | L_ic: 2.614e-05 | L_mass: 2.164e-06 | x_leak: 5988m | q_leak: 0.02328 | 48.0 ms/epoch | VRAM: 0.02GB | Elapsed: 1.7 min
+17:32:08 | Epoch  2500 (Adam) | L_total: 1.982e-04 | L_dat: 7.941e-06 | L_fis: 7.931e-05 | L_bc: 1.300e-05 | L_ic: 1.805e-05 | L_mass: 1.681e-06 | x_leak: 6001m | q_leak: 0.02295 | 47.6 ms/epoch | VRAM: 0.02GB | Elapsed: 2.1 min
+17:32:33 | Epoch  3000 (Adam) | L_total: 1.887e-04 | L_dat: 7.587e-06 | L_fis: 7.714e-05 | L_bc: 1.238e-05 | L_ic: 1.446e-05 | L_mass: 1.778e-06 | x_leak: 5965m | q_leak: 0.02255 | 50.7 ms/epoch | VRAM: 0.02GB | Elapsed: 2.5 min
+17:32:56 | Epoch  3500 (Adam) | L_total: 1.481e-03 | L_dat: 1.249e-04 | L_fis: 7.851e-05 | L_bc: 6.175e-05 | L_ic: 8.081e-05 | L_mass: 2.232e-06 | x_leak: 5954m | q_leak: 0.02215 | 46.2 ms/epoch | VRAM: 0.02GB | Elapsed: 2.9 min
+17:33:19 | Epoch  4000 (Adam) | L_total: 1.700e-04 | L_dat: 7.326e-06 | L_fis: 7.447e-05 | L_bc: 7.182e-06 | L_ic: 9.040e-06 | L_mass: 1.205e-06 | x_leak: 5938m | q_leak: 0.02167 | 44.2 ms/epoch | VRAM: 0.02GB | Elapsed: 3.2 min
+17:33:45 |   >> x_leak lr decay: 4.3e-04 → 4.3e-05
+17:33:45 | Epoch  4500 (Adam) | L_total: 1.537e-04 | L_dat: 7.137e-06 | L_fis: 6.580e-05 | L_bc: 5.371e-06 | L_ic: 7.112e-06 | L_mass: 8.151e-07 | x_leak: 5899m | q_leak: 0.02119 | 51.8 ms/epoch | VRAM: 0.02GB | Elapsed: 3.7 min
+17:34:08 | Epoch  5000 (Adam) | L_total: 2.056e-04 | L_dat: 1.123e-05 | L_fis: 6.578e-05 | L_bc: 1.102e-05 | L_ic: 1.133e-05 | L_mass: 1.045e-06 | x_leak: 5898m | q_leak: 0.02073 | 46.2 ms/epoch | VRAM: 0.02GB | Elapsed: 4.0 min
+17:34:33 | Epoch  5500 (Adam) | L_total: 2.605e-04 | L_dat: 1.606e-05 | L_fis: 6.347e-05 | L_bc: 1.527e-05 | L_ic: 1.039e-05 | L_mass: 2.162e-06 | x_leak: 5897m | q_leak: 0.02028 | 50.9 ms/epoch | VRAM: 0.02GB | Elapsed: 4.5 min
+17:34:56 | Epoch  6000 (Adam) | L_total: 1.629e-04 | L_dat: 9.044e-06 | L_fis: 6.032e-05 | L_bc: 5.100e-06 | L_ic: 5.160e-06 | L_mass: 3.808e-07 | x_leak: 5894m | q_leak: 0.01988 | 46.0 ms/epoch | VRAM: 0.02GB | Elapsed: 4.9 min
+17:35:20 | Epoch  6500 (Adam) | L_total: 1.376e-04 | L_dat: 7.265e-06 | L_fis: 5.853e-05 | L_bc: 1.644e-06 | L_ic: 3.071e-06 | L_mass: 3.310e-07 | x_leak: 5890m | q_leak: 0.01955 | 47.8 ms/epoch | VRAM: 0.02GB | Elapsed: 5.3 min
+17:35:46 | Epoch  7000 (Adam) | L_total: 1.415e-04 | L_dat: 7.133e-06 | L_fis: 5.559e-05 | L_bc: 3.958e-06 | L_ic: 3.290e-06 | L_mass: 1.459e-06 | x_leak: 5888m | q_leak: 0.01922 | 51.5 ms/epoch | VRAM: 0.02GB | Elapsed: 5.7 min
+17:36:08 | Epoch  7500 (Adam) | L_total: 7.081e-04 | L_dat: 6.853e-06 | L_fis: 5.574e-05 | L_bc: 1.524e-04 | L_ic: 7.734e-05 | L_mass: 7.082e-05 | x_leak: 5887m | q_leak: 0.01900 | 44.4 ms/epoch | VRAM: 0.02GB | Elapsed: 6.1 min
+17:36:31 | Epoch  8000 (Adam) | L_total: 1.689e-04 | L_dat: 9.813e-06 | L_fis: 5.295e-05 | L_bc: 7.169e-06 | L_ic: 5.458e-06 | L_mass: 1.039e-06 | x_leak: 5888m | q_leak: 0.01882 | 45.7 ms/epoch | VRAM: 0.02GB | Elapsed: 6.4 min
+17:36:53 | Epoch  8500 (Adam) | L_total: 1.246e-04 | L_dat: 6.928e-06 | L_fis: 5.276e-05 | L_bc: 5.445e-07 | L_ic: 1.376e-06 | L_mass: 1.225e-07 | x_leak: 5888m | q_leak: 0.01865 | 43.9 ms/epoch | VRAM: 0.02GB | Elapsed: 6.8 min
+17:37:15 | Epoch  9000 (Adam) | L_total: 1.203e-04 | L_dat: 6.816e-06 | L_fis: 4.974e-05 | L_bc: 5.837e-07 | L_ic: 1.176e-06 | L_mass: 1.244e-07 | x_leak: 5889m | q_leak: 0.01850 | 44.3 ms/epoch | VRAM: 0.02GB | Elapsed: 7.2 min
+17:37:41 | Epoch  9500 (Adam) | L_total: 1.197e-04 | L_dat: 6.670e-06 | L_fis: 5.070e-05 | L_bc: 7.022e-07 | L_ic: 9.322e-07 | L_mass: 1.236e-07 | x_leak: 5890m | q_leak: 0.01841 | 52.0 ms/epoch | VRAM: 0.02GB | Elapsed: 7.6 min
+17:38:07 | Epoch 10000 (Adam) | L_total: 1.343e-04 | L_dat: 6.862e-06 | L_fis: 5.156e-05 | L_bc: 4.372e-06 | L_ic: 2.095e-06 | L_mass: 1.539e-06 | x_leak: 5889m | q_leak: 0.01831 | 53.2 ms/epoch | VRAM: 0.02GB | Elapsed: 8.0 min
+17:38:32 | Epoch 10500 (Adam) | L_total: 1.138e-04 | L_dat: 6.664e-06 | L_fis: 4.545e-05 | L_bc: 3.769e-07 | L_ic: 8.533e-07 | L_mass: 9.998e-08 | x_leak: 5890m | q_leak: 0.01823 | 48.7 ms/epoch | VRAM: 0.02GB | Elapsed: 8.4 min
+17:38:56 | Epoch 11000 (Adam) | L_total: 1.285e-04 | L_dat: 7.882e-06 | L_fis: 4.565e-05 | L_bc: 1.094e-06 | L_ic: 1.834e-06 | L_mass: 2.285e-07 | x_leak: 5889m | q_leak: 0.01817 | 48.3 ms/epoch | VRAM: 0.02GB | Elapsed: 8.9 min
+17:39:20 | Epoch 11500 (Adam) | L_total: 1.187e-04 | L_dat: 6.601e-06 | L_fis: 4.982e-05 | L_bc: 9.878e-07 | L_ic: 6.902e-07 | L_mass: 2.366e-07 | x_leak: 5889m | q_leak: 0.01813 | 48.8 ms/epoch | VRAM: 0.02GB | Elapsed: 9.3 min
+17:39:44 | Epoch 12000 (Adam) | L_total: 1.218e-04 | L_dat: 6.928e-06 | L_fis: 5.077e-05 | L_bc: 2.582e-07 | L_ic: 9.629e-07 | L_mass: 9.734e-08 | x_leak: 5890m | q_leak: 0.01809 | 46.4 ms/epoch | VRAM: 0.02GB | Elapsed: 9.6 min
+17:40:10 | Epoch 12500 (Adam) | L_total: 1.160e-04 | L_dat: 6.550e-06 | L_fis: 4.897e-05 | L_bc: 5.075e-07 | L_ic: 5.781e-07 | L_mass: 9.945e-08 | x_leak: 5890m | q_leak: 0.01807 | 52.8 ms/epoch | VRAM: 0.02GB | Elapsed: 10.1 min
+17:40:35 | Epoch 13000 (Adam) | L_total: 3.820e-04 | L_dat: 2.978e-05 | L_fis: 4.679e-05 | L_bc: 1.704e-05 | L_ic: 1.911e-05 | L_mass: 2.610e-07 | x_leak: 5890m | q_leak: 0.01805 | 50.2 ms/epoch | VRAM: 0.02GB | Elapsed: 10.5 min
+17:40:57 | Epoch 13500 (Adam) | L_total: 1.146e-04 | L_dat: 6.512e-06 | L_fis: 4.802e-05 | L_bc: 4.516e-07 | L_ic: 5.447e-07 | L_mass: 9.526e-08 | x_leak: 5891m | q_leak: 0.01803 | 43.9 ms/epoch | VRAM: 0.02GB | Elapsed: 10.9 min
+17:41:20 | Epoch 14000 (Adam) | L_total: 1.165e-04 | L_dat: 6.532e-06 | L_fis: 4.964e-05 | L_bc: 5.737e-07 | L_ic: 4.739e-07 | L_mass: 9.639e-08 | x_leak: 5892m | q_leak: 0.01802 | 46.2 ms/epoch | VRAM: 0.02GB | Elapsed: 11.3 min
+17:41:43 | Epoch 14500 (Adam) | L_total: 1.166e-04 | L_dat: 6.726e-06 | L_fis: 4.755e-05 | L_bc: 8.059e-07 | L_ic: 4.694e-07 | L_mass: 9.393e-08 | x_leak: 5890m | q_leak: 0.01801 | 44.9 ms/epoch | VRAM: 0.02GB | Elapsed: 11.6 min
+17:42:07 | Epoch 15000 (Adam) | L_total: 1.143e-04 | L_dat: 6.494e-06 | L_fis: 4.792e-05 | L_bc: 2.989e-07 | L_ic: 6.733e-07 | L_mass: 9.298e-08 | x_leak: 5889m | q_leak: 0.01800 | 49.3 ms/epoch | VRAM: 0.02GB | Elapsed: 12.0 min
+17:42:34 | Epoch 15500 (Adam) | L_total: 1.161e-04 | L_dat: 6.459e-06 | L_fis: 5.012e-05 | L_bc: 3.740e-07 | L_ic: 5.513e-07 | L_mass: 9.255e-08 | x_leak: 5889m | q_leak: 0.01800 | 53.1 ms/epoch | VRAM: 0.02GB | Elapsed: 12.5 min
+17:42:59 | Epoch 16000 (Adam) | L_total: 1.143e-04 | L_dat: 6.445e-06 | L_fis: 4.852e-05 | L_bc: 3.516e-07 | L_ic: 5.470e-07 | L_mass: 9.205e-08 | x_leak: 5889m | q_leak: 0.01800 | 51.1 ms/epoch | VRAM: 0.02GB | Elapsed: 12.9 min
+17:43:22 | Epoch 16500 (Adam) | L_total: 1.128e-04 | L_dat: 6.434e-06 | L_fis: 4.711e-05 | L_bc: 3.653e-07 | L_ic: 5.515e-07 | L_mass: 9.164e-08 | x_leak: 5889m | q_leak: 0.01799 | 45.2 ms/epoch | VRAM: 0.02GB | Elapsed: 13.3 min
+17:43:43 | Epoch 17000 (Adam) | L_total: 1.133e-04 | L_dat: 6.433e-06 | L_fis: 4.757e-05 | L_bc: 3.561e-07 | L_ic: 5.667e-07 | L_mass: 9.133e-08 | x_leak: 5889m | q_leak: 0.01799 | 42.2 ms/epoch | VRAM: 0.02GB | Elapsed: 13.6 min
+17:44:06 | Epoch 17500 (Adam) | L_total: 1.119e-04 | L_dat: 6.428e-06 | L_fis: 4.629e-05 | L_bc: 3.262e-07 | L_ic: 5.685e-07 | L_mass: 9.107e-08 | x_leak: 5890m | q_leak: 0.01799 | 46.7 ms/epoch | VRAM: 0.02GB | Elapsed: 14.0 min
+17:44:29 | Epoch 18000 (Adam) | L_total: 1.140e-04 | L_dat: 6.414e-06 | L_fis: 4.856e-05 | L_bc: 3.224e-07 | L_ic: 5.609e-07 | L_mass: 9.090e-08 | x_leak: 5890m | q_leak: 0.01799 | 45.1 ms/epoch | VRAM: 0.02GB | Elapsed: 14.4 min
+17:44:29 | ─── Fase L-BFGS: Refinamiento (2000 iteraciones máx) ───
+17:44:29 | Epoch 18001 (LBFGS) | L_total: 1.105e-04 | L_dat: 6.416e-06 | L_fis: 4.498e-05 | L_bc: 3.281e-07 | L_ic: 5.529e-07 | L_mass: 9.089e-08 | x_leak: 5890m | q_leak: 0.01799 | 381.7 ms/epoch | VRAM: 0.02GB | Elapsed: 14.4 min
+17:44:30 | L-BFGS converged at step 3 (change in loss < 1e-12). Stopping.
+17:44:31 | P_moc shape:  (101, 2401)
+17:44:31 | P_pred shape: (101, 2401)
+17:44:31 | Diferencia shape: (101, 2401)
+17:44:32 | ════════════════════════════════
+17:44:32 | RESULTADO CASO BASE
+17:44:32 |   x_leak real:  6000 m
+17:44:32 |   x_leak pred:  5890 m
+17:44:32 |   Error:        0.110 km
+17:44:32 |   q_leak real:  0.0150 m³/s
+17:44:32 |   q_leak pred:  0.0180 m³/s
+17:44:32 |   Error:        19.95 %
+17:44:32 | ════════════════════════════════
+17:44:32 | Training complete. Model saved to checkpoints/pinn_s8_n5_trivial.pt
+17:44:32 | Log saved. Check logs/ directory for full history.

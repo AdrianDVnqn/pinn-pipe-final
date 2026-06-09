@@ -1,0 +1,35 @@
+17:01:11 | Log file: /mnt/d/MCD_24-26/PROYECTO_FINAL_PINN/logs/train_20260609_170111.log
+17:01:11 | ─── Entrenamiento completo (200 epochs, 3 sensores) ───
+17:01:12 | PyTorch version: 2.5.1
+17:01:12 | torch.compile available: True
+17:01:12 | Device: cuda
+17:01:12 | GPU: NVIDIA GeForce RTX 3080
+17:01:12 | VRAM total: 12.9 GB
+17:01:12 | Scenario: 8 | Noise: trivial | Sensors: 3
+17:01:12 | Lambdas: {'data': 10.0, 'pde': 1.0, 'bc': 1.0, 'ic': 1.0, 'mass': 5.0}
+17:01:12 | LR: 0.001 | Collocation: 20,000 | Epochs: 200
+17:01:12 | Training start: 160 Adam epochs + 40 L-BFGS epochs, 20,000 collocation points
+17:01:15 | Epoch 1: Grad L_data (7.068e+01) >> Grad L_pde (7.092e-03)
+17:01:15 | Esto puede causar que la red ignore la física y apague la fuga (q_leak ~ 0).
+17:01:15 | Sugerencia: λ_pde = λ_pde * (grad_data_norm / (grad_pde_norm + 1e-8))
+17:01:15 | Epoch     1 (Adam) | L_total: 9.870e+00 | L_dat: 6.084e-01 | L_fis: 5.574e-04 | L_bc: 9.403e-01 | L_ic: 1.525e+00 | L_mass: 2.640e-01 | x_leak: 5011m | q_leak: 0.02544 | 1615.7 ms/epoch | VRAM: 0.02GB | Elapsed: 0.0 min
+17:01:16 |   >> x_leak lr decay: 4.9e-03 → 4.9e-04
+17:01:17 |   >> x_leak lr decay: 4.3e-04 → 4.3e-05
+17:01:22 | Epoch   160 (Adam) | L_total: 6.882e-03 | L_dat: 3.974e-04 | L_fis: 9.548e-05 | L_bc: 1.001e-03 | L_ic: 1.445e-03 | L_mass: 7.341e-05 | x_leak: 5034m | q_leak: 0.02465 | 42.6 ms/epoch | VRAM: 0.02GB | Elapsed: 0.1 min
+17:01:22 | ─── Fase L-BFGS: Refinamiento (40 iteraciones máx) ───
+17:01:22 | Epoch   161 (LBFGS) | L_total: 6.816e-03 | L_dat: 4.070e-04 | L_fis: 1.011e-04 | L_bc: 9.210e-04 | L_ic: 1.356e-03 | L_mass: 7.364e-05 | x_leak: 5034m | q_leak: 0.02465 | 260.7 ms/epoch | VRAM: 0.02GB | Elapsed: 0.1 min
+17:01:27 | L-BFGS converged at step 36 (change in loss < 1e-12). Stopping.
+17:01:28 | P_moc shape:  (101, 2401)
+17:01:28 | P_pred shape: (101, 2401)
+17:01:28 | Diferencia shape: (101, 2401)
+17:01:29 | ════════════════════════════════
+17:01:29 | RESULTADO CASO BASE
+17:01:29 |   x_leak real:  6000 m
+17:01:29 |   x_leak pred:  5034 m
+17:01:29 |   Error:        0.966 km
+17:01:29 |   q_leak real:  0.0150 m³/s
+17:01:29 |   q_leak pred:  0.0246 m³/s
+17:01:29 |   Error:        64.00 %
+17:01:29 | ════════════════════════════════
+17:01:29 | Training complete. Model saved to checkpoints/pinn_s8_n3_trivial.pt
+17:01:29 | Log saved. Check logs/ directory for full history.

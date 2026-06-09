@@ -78,7 +78,11 @@ def apply_noise(data: np.ndarray, noise_std: float, seed: int = cfg.RANDOM_SEED)
 
 
 def get_training_data(scenario_id: int, noise_level: str, n_sensors: int = 3) -> dict:
-    """Carga un escenario, selecciona sensores y aplica ruido sólo en ejecución."""
+    """Carga un escenario, selecciona sensores y aplica ruido sólo en ejecución.
+
+    When n_sensors > len(x_sensors), pressure is interpolated from P_full
+    (the full spatial field) instead of the sparse P_sensors array.
+    """
     if noise_level not in cfg.NOISE_LEVELS:
         valid_levels = ', '.join(cfg.NOISE_LEVELS)
         raise ValueError(f'noise_level inválido: {noise_level}. Valores válidos: {valid_levels}')
@@ -90,7 +94,16 @@ def get_training_data(scenario_id: int, noise_level: str, n_sensors: int = 3) ->
     target_positions = np.asarray(cfg.SENSOR_SUBSETS[n_sensors], dtype=float)
     base_positions = np.asarray(scenario['x_sensors'], dtype=float)
 
-    P_subset = _resample_sensor_block(base_positions, scenario['P_sensors'], target_positions)
+    # Use P_full (full spatial grid) when requesting more positions than
+    # available in P_sensors.  This allows arbitrary sensor layouts without
+    # regenerating the dataset.
+    if n_sensors > len(base_positions):
+        x_full = np.asarray(scenario['x'], dtype=float)        # (101,)
+        P_full = np.asarray(scenario['P_full'], dtype=float)    # (101, Nt)
+        P_subset = _resample_sensor_block(x_full, P_full, target_positions)
+    else:
+        P_subset = _resample_sensor_block(base_positions, scenario['P_sensors'], target_positions)
+
     Q_subset = _resample_sensor_block(base_positions, scenario['Q_sensors'], target_positions)
     P_ss_subset = np.interp(target_positions, scenario['x'], scenario['P_ss'])
 
