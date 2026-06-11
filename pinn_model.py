@@ -162,20 +162,34 @@ def compute_loss(model: LeakPINN, data_dict: Dict, x_col: torch.Tensor, t_col: t
 
     t = data_dict['t_tensor']
     P_noisy_tensor = data_dict['P_noisy_tensor']
-    x_sensors = data_dict['x_sensors_tensor']
+    Q_noisy_tensor = data_dict['Q_noisy_tensor']
+    x_pressure_sensors = data_dict['x_pressure_sensors_tensor']
+    x_flow_meters = data_dict['x_flow_meters_tensor']
     P_inlet = data_dict['P_INLET_t']
     Q_outlet = data_dict['Q_OUTLET_t']
 
-    # Data loss (pressure only at sensors) - normalized by P_inlet
-    L_datos = torch.tensor(0.0, device=device)
     Nt = t.shape[0]
-    for i in range(x_sensors.shape[0]):
-        x_val = x_sensors[i].item()
+
+    # ── L_P: Pressure data loss at intermediate sensors ──
+    L_P = torch.tensor(0.0, device=device)
+    for i in range(x_pressure_sensors.shape[0]):
+        x_val = x_pressure_sensors[i].item()
         x_tensor = torch.full((Nt,), x_val, dtype=torch.float32, device=device)
         P_pred, _ = model(x_tensor, t)
         P_target = P_noisy_tensor[i]
-        L_datos = L_datos + mse(P_pred / P_inlet, P_target / P_inlet)
-    L_datos = L_datos / float(x_sensors.shape[0])
+        L_P = L_P + mse(P_pred / P_inlet, P_target / P_inlet)
+    L_P = L_P / float(x_pressure_sensors.shape[0])
+
+    # ── L_Q: Flow data loss at extremes (flow meters) ──
+    # Q_in - Q_out is the most direct signal of a leak.
+    L_Q = torch.tensor(0.0, device=device)
+    for i in range(x_flow_meters.shape[0]):
+        x_val = x_flow_meters[i].item()
+        x_tensor = torch.full((Nt,), x_val, dtype=torch.float32, device=device)
+        _, Q_pred = model(x_tensor, t)
+        Q_target = Q_noisy_tensor[i]
+        L_Q = L_Q + mse(Q_pred / Q_outlet, Q_target / Q_outlet)
+    L_Q = L_Q / float(x_flow_meters.shape[0])
 
     # PDE residual loss
     r_cont, r_mom = compute_pde_residuals(model, x_col, t_col)
@@ -193,47 +207,35 @@ def compute_loss(model: LeakPINN, data_dict: Dict, x_col: torch.Tensor, t_col: t
     P_ss_x = data_dict['P_ss_x']
     L_inicial = mse(P_pred_ic / P_inlet, P_ss_x / P_inlet) + mse(Q_pred_ic / Q_outlet, torch.ones_like(Q_pred_ic))
 
-    # Global mass balance constraint (derived from physics, not data)
-    # In quasi-steady state (t >> t_leak): Q(0,t) - Q(L,t) = q_leak
-    # This couples the network's Q field to q_leak without external Q measurements
-    t_late = data_dict['t_mass_balance']
-    x0_mb = torch.zeros_like(t_late)
-    xL_mb = torch.full_like(t_late, float(model.L))
-    _, Q_inlet_late = model(x0_mb, t_late)
-    _, Q_outlet_late = model(xL_mb, t_late)
-    delta_Q = (Q_inlet_late - Q_outlet_late) / Q_outlet
-    q_leak_norm = model.q_leak / Q_outlet
-    L_masa = mse(delta_Q, q_leak_norm.expand_as(delta_Q))
-
     L_total = (
-        lambdas['data'] * L_datos
+        lambdas['P'] * L_P
+        + lambdas['Q'] * L_Q
         + lambdas['pde'] * L_fisica
         + lambdas['bc'] * L_contorno
         + lambdas['ic'] * L_inicial
-        + lambdas['mass'] * L_masa
     )
 
     components = {
         'L_total': float(L_total.detach().cpu().item()),
-        'L_datos': float(L_datos.detach().cpu().item()),
+        'L_P': float(L_P.detach().cpu().item()),
+        'L_Q': float(L_Q.detach().cpu().item()),
         'L_fisica': float(L_fisica.detach().cpu().item()),
         'L_contorno': float(L_contorno.detach().cpu().item()),
         'L_inicial': float(L_inicial.detach().cpu().item()),
-        'L_masa': float(L_masa.detach().cpu().item()),
     }
     tensors = {
-        'L_datos': L_datos,
+        'L_P': L_P,
+        'L_Q': L_Q,
         'L_fisica': L_fisica,
         'L_contorno': L_contorno,
         'L_inicial': L_inicial,
-        'L_masa': L_masa,
     }
     return L_total, components, tensors
 
 
 def train_pinn(scenario_id=7,
                noise_level="trivial",
-               n_sensors=3,
+               n_pressure_sensors=3,
                n_epochs=10_000,
                n_collocation=None,
                lr=1e-3,
@@ -243,7 +245,7 @@ def train_pinn(scenario_id=7,
                use_lbfgs=True,
                lbfgs_epochs=2000):
     if lambdas is None:
-        lambdas = {"data": 10.0, "pde": 1.0, "bc": 1.0, "ic": 1.0, "mass": 5.0}
+        lambdas = {"P": 10.0, "Q": 20.0, "pde": 1.0, "bc": 5.0, "ic": 5.0}
 
     torch.set_float32_matmul_precision('high')
 
@@ -257,7 +259,7 @@ def train_pinn(scenario_id=7,
         except Exception:
             pass
 
-    data = get_training_data(scenario_id, noise_level, n_sensors)
+    data = get_training_data(scenario_id, noise_level, n_pressure_sensors)
 
     # VRAM-based default for collocation
     if n_collocation is None:
@@ -283,7 +285,7 @@ def train_pinn(scenario_id=7,
             pass
 
     # Log hyperparameters
-    log.info(f"Scenario: {scenario_id} | Noise: {noise_level} | Sensors: {n_sensors}")
+    log.info(f"Scenario: {scenario_id} | Noise: {noise_level} | P_sensors: {n_pressure_sensors} | Flow_meters: 2 (fixed)")
     log.info(f"Lambdas: {lambdas}")
     log.info(f"LR: {lr} | Collocation: {n_collocation:,} | Epochs: {n_epochs}")
 
@@ -318,7 +320,9 @@ def train_pinn(scenario_id=7,
     # Move static data once to device
     t_tensor = torch.tensor(data['t'], dtype=torch.float32, device=device)
     P_noisy_tensor = torch.tensor(data['P_noisy'], dtype=torch.float32, device=device)
-    x_sensors_tensor = torch.tensor(data['x_sensors_used'], dtype=torch.float32, device=device)
+    Q_noisy_tensor = torch.tensor(data['Q_noisy'], dtype=torch.float32, device=device)
+    x_pressure_sensors_tensor = torch.tensor(data['x_pressure_sensors_used'], dtype=torch.float32, device=device)
+    x_flow_meters_tensor = torch.tensor(data['x_flow_meters'], dtype=torch.float32, device=device)
     P_INLET_t = torch.tensor(float(cfg.P_INLET), dtype=torch.float32, device=device)
     Q_OUTLET_t = torch.tensor(float(cfg.Q_OUTLET), dtype=torch.float32, device=device)
     RHO_t = torch.tensor(float(cfg.FLUID_DENSITY), dtype=torch.float32, device=device)
@@ -333,9 +337,7 @@ def train_pinn(scenario_id=7,
     x_ic = torch.linspace(0.0, float(cfg.PIPE_LENGTH), Nic, dtype=torch.float32, device=device)
     t0_ic = torch.zeros_like(x_ic, device=device)
 
-    # Mass balance: sample late-time points (t > 0.75 * T_total, well after leak onset)
-    N_mass = 100
-    t_mass_balance = torch.linspace(0.75 * float(cfg.T_TOTAL), float(cfg.T_TOTAL), N_mass, dtype=torch.float32, device=device)
+
 
     # steady state analytical on device
     A = math.pi * cfg.PIPE_DIAMETER ** 2 / 4.0
@@ -346,10 +348,12 @@ def train_pinn(scenario_id=7,
     device_data = {
         'scenario_id': scenario_id,
         'noise_level': noise_level,
-        'n_sensors': n_sensors,
+        'n_pressure_sensors': n_pressure_sensors,
         't_tensor': t_tensor,
         'P_noisy_tensor': P_noisy_tensor,
-        'x_sensors_tensor': x_sensors_tensor,
+        'Q_noisy_tensor': Q_noisy_tensor,
+        'x_pressure_sensors_tensor': x_pressure_sensors_tensor,
+        'x_flow_meters_tensor': x_flow_meters_tensor,
         'P_INLET_t': P_INLET_t,
         'Q_OUTLET_t': Q_OUTLET_t,
         'RHO_t': RHO_t,
@@ -359,7 +363,6 @@ def train_pinn(scenario_id=7,
         'x_ic': x_ic,
         't0_ic': t0_ic,
         'P_ss_x': P_ss_x,
-        't_mass_balance': t_mass_balance,
     }
 
     # Preallocate collocation tensors on device and reuse (in-place randomize)
@@ -387,9 +390,9 @@ def train_pinn(scenario_id=7,
         
         # Analyze gradients of L_datos vs L_fisica in first epochs to detect imbalance
         if epoch <= 5:
-            # 1. Gradient of weighted L_datos
+            # 1. Gradient of weighted L_P
             optimizer.zero_grad()
-            (lambdas['data'] * comps_tensors['L_datos']).backward(retain_graph=True)
+            (lambdas['P'] * comps_tensors['L_P']).backward(retain_graph=True)
             grad_data_norm = 0.0
             for p in model.network_params():
                 if p.grad is not None:
@@ -406,7 +409,7 @@ def train_pinn(scenario_id=7,
             grad_pde_norm = grad_pde_norm ** 0.5
             
             if grad_data_norm > 10.0 * grad_pde_norm and epoch == 1:
-                log.warning(f"Epoch {epoch}: Grad L_data ({grad_data_norm:.3e}) >> Grad L_pde ({grad_pde_norm:.3e})")
+                log.warning(f"Epoch {epoch}: Grad L_P ({grad_data_norm:.3e}) >> Grad L_pde ({grad_pde_norm:.3e})")
                 log.warning("Esto puede causar que la red ignore la física y apague la fuga (q_leak ~ 0).")
                 log.warning("Sugerencia: λ_pde = λ_pde * (grad_data_norm / (grad_pde_norm + 1e-8))")
                 
@@ -430,22 +433,22 @@ def train_pinn(scenario_id=7,
             history.append({
                 'epoch': epoch,
                 'loss_total': comps['L_total'],
-                'L_datos': comps['L_datos'],
+                'L_P': comps['L_P'],
+                'L_Q': comps['L_Q'],
                 'L_fisica': comps['L_fisica'],
                 'L_contorno': comps['L_contorno'],
                 'L_inicial': comps['L_inicial'],
-                'L_masa': comps['L_masa'],
                 'x_leak_pred': float(model.x_leak.detach().cpu().numpy()),
                 'q_leak_pred': float(model.q_leak.detach().cpu().numpy()),
             })
 
         if epoch == 1000 and verbose:
             log.info("─── Balance de loss en epoch 1000 ───")
-            log.info(f"  L_datos    × λ_data = {comps['L_datos'] * lambdas['data']:.3e}")
+            log.info(f"  L_P        × λ_P   = {comps['L_P'] * lambdas['P']:.3e}")
+            log.info(f"  L_Q        × λ_Q   = {comps['L_Q'] * lambdas['Q']:.3e}")
             log.info(f"  L_fisica   × λ_pde  = {comps['L_fisica'] * lambdas['pde']:.3e}")
             log.info(f"  L_contorno × λ_bc   = {comps['L_contorno'] * lambdas['bc']:.3e}")
             log.info(f"  L_inicial  × λ_ic   = {comps['L_inicial'] * lambdas['ic']:.3e}")
-            log.info(f"  L_masa     × λ_mass = {comps['L_masa'] * lambdas['mass']:.3e}")
             log.info("  → Los 5 valores deberían ser del mismo orden de magnitud")
             log.info("────────────────────────────────────")
 
@@ -457,11 +460,11 @@ def train_pinn(scenario_id=7,
             log.info(
                 f"Epoch {epoch:5d} (Adam) | "
                 f"L_total: {comps['L_total']:.3e} | "
-                f"L_dat: {comps['L_datos']:.3e} | "
+                f"L_P: {comps['L_P']:.3e} | "
+                f"L_Q: {comps['L_Q']:.3e} | "
                 f"L_fis: {comps['L_fisica']:.3e} | "
                 f"L_bc: {comps['L_contorno']:.3e} | "
                 f"L_ic: {comps['L_inicial']:.3e} | "
-                f"L_mass: {comps['L_masa']:.3e} | "
                 f"x_leak: {model.x_leak.item():.0f}m | "
                 f"q_leak: {model.q_leak.item():.5f} | "
                 f"{epoch_ms:.1f} ms/epoch | VRAM: {vram_used:.2f}GB | Elapsed: {elapsed/60:.1f} min"
@@ -536,11 +539,11 @@ def train_pinn(scenario_id=7,
                     history.append({
                         'epoch': epoch_idx,
                         'loss_total': c_lbfgs['L_total'],
-                        'L_datos': c_lbfgs['L_datos'],
+                        'L_P': c_lbfgs['L_P'],
+                        'L_Q': c_lbfgs['L_Q'],
                         'L_fisica': c_lbfgs['L_fisica'],
                         'L_contorno': c_lbfgs['L_contorno'],
                         'L_inicial': c_lbfgs['L_inicial'],
-                        'L_masa': c_lbfgs['L_masa'],
                         'x_leak_pred': float(model.x_leak.detach().cpu().numpy()),
                         'q_leak_pred': float(model.q_leak.detach().cpu().numpy()),
                     })
@@ -553,11 +556,11 @@ def train_pinn(scenario_id=7,
                     log.info(
                         f"Epoch {epoch_idx:5d} (LBFGS) | "
                         f"L_total: {c_lbfgs['L_total']:.3e} | "
-                        f"L_dat: {c_lbfgs['L_datos']:.3e} | "
+                        f"L_P: {c_lbfgs['L_P']:.3e} | "
+                        f"L_Q: {c_lbfgs['L_Q']:.3e} | "
                         f"L_fis: {c_lbfgs['L_fisica']:.3e} | "
                         f"L_bc: {c_lbfgs['L_contorno']:.3e} | "
                         f"L_ic: {c_lbfgs['L_inicial']:.3e} | "
-                        f"L_mass: {c_lbfgs['L_masa']:.3e} | "
                         f"x_leak: {model.x_leak.item():.0f}m | "
                         f"q_leak: {model.q_leak.item():.5f} | "
                         f"{epoch_ms:.1f} ms/epoch | VRAM: {vram_used:.2f}GB | Elapsed: {elapsed/60:.1f} min"
@@ -597,7 +600,7 @@ def train_pinn(scenario_id=7,
         'history': df,
         'scenario_id': scenario_id,
         'noise_level': noise_level,
-        'n_sensors': n_sensors,
+        'n_pressure_sensors': n_pressure_sensors,
         'x_leak_pred': x_pred,
         'q_leak_pred': q_pred,
         'x_leak_true': data['x_leak'],
@@ -624,7 +627,8 @@ def plot_training_diagnostics(train_result: Dict, save_dir: str = 'figs'):
         axs[0].set_yscale('log')
         axs[0].set_title('Total loss')
 
-        axs[1].plot(df['epoch'], df['L_datos'], label='data')
+        axs[1].plot(df['epoch'], df['L_P'], label='L_P')
+        axs[1].plot(df['epoch'], df['L_Q'], label='L_Q')
         axs[1].plot(df['epoch'], df['L_fisica'], label='physics')
         axs[1].plot(df['epoch'], df['L_contorno'], label='bc')
         axs[1].plot(df['epoch'], df['L_inicial'], label='ic')
@@ -648,7 +652,7 @@ def plot_training_diagnostics(train_result: Dict, save_dir: str = 'figs'):
     data = get_training_data(
         train_result.get('scenario_id', 7),
         train_result.get('noise_level', 'trivial'),
-        train_result.get('n_sensors', 3),
+        train_result.get('n_pressure_sensors', 3),
     )
     x = data['x']
     t = data['t']
@@ -679,20 +683,20 @@ def plot_training_diagnostics(train_result: Dict, save_dir: str = 'figs'):
     fig.savefig(os.path.join(save_dir, 'pinn_pressure_field.png'))
     plt.close(fig)
 
-    # Sensor fit
-    x_sensors = data['x_sensors_used']
+    # Pressure sensor fit
+    x_p_sensors = data['x_pressure_sensors_used']
     P_noisy = data['P_noisy']
-    fig, axs = plt.subplots(len(x_sensors), 1, figsize=(8, 3 * len(x_sensors)))
-    if len(x_sensors) == 1:
+    fig, axs = plt.subplots(len(x_p_sensors), 1, figsize=(8, 3 * len(x_p_sensors)))
+    if len(x_p_sensors) == 1:
         axs = [axs]
-    for i, xs in enumerate(x_sensors):
+    for i, xs in enumerate(x_p_sensors):
         t = data['t']
         t_t = torch.tensor(t, dtype=torch.float32)
         x_t = torch.full_like(t_t, float(xs))
         P_pred, _ = model(x_t.to(device), t_t.to(device))
         axs[i].plot(t, P_pred.detach().cpu().numpy(), label='PINN')
         axs[i].scatter(t, P_noisy[i, :], s=6, color='k', alpha=0.6, label='data')
-        axs[i].set_title(f'Sensor @ {int(xs)} m')
+        axs[i].set_title(f'P sensor @ {int(xs)} m')
         axs[i].legend()
     plt.tight_layout()
     fig.savefig(os.path.join(save_dir, 'pinn_sensor_fit.png'))
@@ -727,7 +731,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train Leak PINN')
     parser.add_argument('--scenario', type=int, default=8, help='Scenario ID (default: 8)')
     parser.add_argument('--noise', type=str, default='trivial', help='Noise level (default: trivial)')
-    parser.add_argument('--n_sensors', type=int, default=3, help='Number of sensors: 2,3,5,11 (default: 3)')
+    parser.add_argument('--n_pressure_sensors', type=int, default=3, help='Number of pressure sensors: 2,3 (default: 3)')
     parser.add_argument('--n_epochs', type=int, default=20000, help='Training epochs (default: 20000)')
     parser.add_argument('--skip_benchmark', action='store_true', help='Skip the 100-epoch benchmark')
     parser.add_argument('--no_lbfgs', action='store_true', help='Disable L-BFGS refinement')
@@ -740,7 +744,7 @@ if __name__ == '__main__':
         log.info('─── Benchmark rápido (100 epochs) ───')
         t0 = time.time()
         try:
-            _ = train_pinn(n_epochs=100, n_sensors=args.n_sensors, verbose=True, progress_every=20, use_lbfgs=False)
+            _ = train_pinn(n_epochs=100, n_pressure_sensors=args.n_pressure_sensors, verbose=True, progress_every=20, use_lbfgs=False)
             t_100 = time.time() - t0
             log.info(f'100 epochs: {t_100:.2f}s')
             log.info(f'Estimado para {args.n_epochs:,} epochs: {t_100 * args.n_epochs / 100:.1f} s (~{t_100 * args.n_epochs / 100 / 60:.1f} min)')
@@ -749,11 +753,11 @@ if __name__ == '__main__':
 
     # Full training with OOM handling
     try:
-        log.info(f'─── Entrenamiento completo ({args.n_epochs:,} epochs, {args.n_sensors} sensores) ───')
+        log.info(f'─── Entrenamiento completo ({args.n_epochs:,} epochs, {args.n_pressure_sensors} sensores P + 2 caudalímetros) ───')
         result = train_pinn(
             scenario_id=args.scenario,
             noise_level=args.noise,
-            n_sensors=args.n_sensors,
+            n_pressure_sensors=args.n_pressure_sensors,
             n_epochs=args.n_epochs,
             n_collocation=None,
             verbose=True,
@@ -767,7 +771,7 @@ if __name__ == '__main__':
         result = train_pinn(
             scenario_id=args.scenario,
             noise_level=args.noise,
-            n_sensors=args.n_sensors,
+            n_pressure_sensors=args.n_pressure_sensors,
             n_epochs=args.n_epochs,
             n_collocation=10000,
             verbose=True,
@@ -777,7 +781,7 @@ if __name__ == '__main__':
         )
 
     plot_training_diagnostics(result)
-    ckpt_name = f'pinn_s{args.scenario}_n{args.n_sensors}_{args.noise}.pt'
+    ckpt_name = f'pinn_s{args.scenario}_nP{args.n_pressure_sensors}_{args.noise}.pt'
     torch.save(result['model'].state_dict(), os.path.join('checkpoints', ckpt_name))
     log.info(f'Training complete. Model saved to checkpoints/{ckpt_name}')
     log.info(f'Log saved. Check logs/ directory for full history.')

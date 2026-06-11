@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.h5
+*.pt
+last_msg*.txt
+prompt_factorial.txt
+.vscode/
+.qodo/
+logs/

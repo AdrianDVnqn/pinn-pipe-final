@@ -1,6 +1,17 @@
 # Simulador MOC de Oleoducto
 
-Este proyecto implementa un simulador unidimensional de flujo transitorio en una tubería usando el **Método de las Características (MOC)**. El objetivo es generar datos sintéticos de presión y caudal para luego entrenar una PINN de detección de fugas.
+El objetivo de este proyecto es desarrollar y evaluar una **Physics-Informed Neural Network (PINN)** capaz de detectar, localizar y cuantificar fugas en un oleoducto utilizando únicamente mediciones transitorias de presión y caudal, resolviendo el problema inverso de las ecuaciones de Navier-Stokes unidimensionales.
+
+## Configuración de sensores
+
+Basada en instrumentación industrial real para oleoductos:
+
+| Tipo | Posiciones | Cantidad | Justificación |
+|---|---|---|---|
+| Transmisor de presión | 1000, 5000, 9000 m | 2–3 | Económico, instalable en campo |
+| Caudalímetro | 0, 10000 m | 2 (fijo) | Caro, solo en transferencia de custodia |
+
+Los sensores de presión varían entre 2 y 3 en el experimento factorial. Los caudalímetros en extremos son siempre 2 y no forman parte del eje experimental — son una constante del sistema.
 
 ## Idea conceptual
 
@@ -182,19 +193,118 @@ El aporte diferencial de la tesis es el análisis sistemático de robustez bajo 
 Esto genera 5 × 2 = 10 condiciones experimentales por escenario.
 El ruido se aplica en tiempo de ejecución, no se almacena en el dataset, y usa semilla fija (`seed=42`) para garantizar reproducibilidad.
 
+## Baselines
+
+### Baseline 1: SCADA Clásico (Mass Balance + NPW)
+
+Representa el estado del arte actual en la industria sin uso de Machine Learning.
+* **Detección**: Balance de masa tradicional midiendo la diferencia entre el caudalímetro de entrada y el de salida. Si $\Delta Q$ supera un umbral de $3\sigma$, se declara alarma de fuga.
+* **Localización**: Método de la Onda de Presión Negativa (NPW). Cuando ocurre la ruptura, se propaga una onda de descompresión a la velocidad del sonido en ambas direcciones. Midiendo el $T_{arrival}$ en los sensores de presión, se triangula la posición usando $x = \frac{L + a \cdot \Delta t}{2}$.
+
+Resultados guardados en: `results/baseline_mass_balance.csv`
+
+```bash
+python baseline_mass_balance.py
+```
+
+### Baseline 2: Gradiente de Presión
+
+Método basado en régimen cuasi-estacionario.
+Trabaja en dominio espacial (no temporal como NPW).
+
+Principio: una fuga crea un quiebre en el perfil lineal
+de presión. Upstream el gradiente es mayor (más flujo),
+downstream menor (menos flujo).
+
+* **Detección**: cambio relativo entre gradientes de segmentos adyacentes > 15% → fuga detectada
+* **Localización**: intersección de las dos líneas de gradiente (upstream desde x=0, downstream desde x=L) estimadas a partir de los caudales medidos en los extremos.
+
+Latencia de detección: ~120s (necesita régimen estacionario) vs. ~55s del NPW. Trade-off: más robusto a transitorios.
+
+Resultados guardados en: `results/baseline_pressure_gradient.csv`
+
+```bash
+python baseline_pressure_gradient.py
+```
+
+### Baseline 3: LSTM Puro (sin física)
+
+Red neuronal recurrente entrenada sobre series temporales
+de sensores. No incorpora ecuaciones de flujo.
+
+Arquitectura:
+  - LSTM bidireccional: 2 capas, hidden_size=128
+  - Input: 5 canales (3 dP + 2 dQ) × 2401 timesteps
+  - Output: x_leak_norm, q_leak_norm, has_leak (prob)
+
+Dataset de entrenamiento:
+  - 3440 samples generados con MOC + augmentación de ruido
+  - Test: los 12 escenarios estándar de dataset.h5
+
+Ventaja sobre PINN: inferencia en ~5ms (vs ~14 min de PINN)
+Desventaja sobre PINN: requiere dataset de entrenamiento supervisado; no aprovecha conocimiento físico del sistema.
+
+Resultados guardados en: `results/baseline_lstm.csv`
+
 ## Estructura del proyecto
 
 ```text
-├── config.py              # Parámetros globales del experimento
-├── data_utils.py          # Carga de escenarios y aplicación de ruido
-├── verify_data_utils.py   # Verificación de utilidades de datos
-├── moc_simulator.py       # Simulador MOC: run_moc() y get_sensor_data()
-├── generate_dataset.py    # Generación del dataset sintético
-├── dataset.h5             # Dataset generado (13 escenarios)
-├── figs/                  # Figuras de análisis exploratorio
+├── config.py                 # Parámetros globales del experimento
+├── data_utils.py             # Carga de escenarios y aplicación de ruido
+├── verify_data_utils.py      # Verificación de utilidades de datos
+├── moc_simulator.py          # Simulador MOC: run_moc() y get_sensor_data()
+├── generate_dataset.py       # Generación del dataset sintético base
+├── generate_lstm_dataset.py  # Generación del dataset extendido para LSTM
+├── pinn_model.py             # Red PINN para problema inverso
+├── baseline_mass_balance.py  # Baseline 1: Balance de Masa + NPW
+├── baseline_pressure_gradient.py # Baseline 2: Gradiente de Presión
+├── baseline_lstm.py          # Baseline 3: LSTM Supervisado
+├── dataset.h5                # Dataset base generado (13 escenarios)
+├── lstm_dataset.h5           # Dataset extendido para LSTM
+├── results/                  # Resultados de evaluación (CSV)
+│   ├── baseline_mass_balance.csv
+│   ├── baseline_pressure_gradient.csv
+│   └── baseline_lstm.csv
+├── figs/                     # Figuras de análisis
 │   ├── overview_leak_sizes.png
 │   ├── overview_leak_positions.png
 │   ├── snr_heatmap.png
-│   └── wave_arrival_times.png
+│   ├── wave_arrival_times.png
+│   ├── mb_detection_example.png
+│   ├── mb_error_vs_noise.png
+│   └── mb_detection_rate.png
 └── README.md
 ```
+## Experimento factorial comparativo
+
+### Ejecución
+
+`ash
+# Paso 1: correr experimento completo (overnight)
+python run_factorial_experiment.py
+
+# Paso 2: generar figuras de la tesis
+python generate_thesis_figures.py
+
+# Para saltar corridas ya completadas (resume):
+python run_factorial_experiment.py --skip-pinn
+`
+
+### Resultados
+
+`	ext
+results/
+├── baseline_mass_balance.csv
+├── baseline_pressure_gradient.csv
+├── baseline_lstm.csv
+├── pinn_factorial.csv
+├── master_results.csv         ← todos los métodos combinados
+└── aggregate_metrics.csv      ← métricas por método × ruido × sensores
+
+figs/
+├── thesis_main_comparison.png  ← figura principal de la tesis
+├── thesis_error_heatmap.png
+├── thesis_by_leak_size.png
+├── thesis_sensor_impact.png
+└── thesis_summary_table.png   ← para presentación de defensa
+`
