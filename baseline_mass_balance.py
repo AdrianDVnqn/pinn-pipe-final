@@ -70,8 +70,11 @@ class MassBalanceDetector:
         self._baseline_mean = np.mean(delta_Q_smooth[mask_baseline])
         self._baseline_std = np.std(delta_Q_smooth[mask_baseline])
         # Evitar std = 0 en datos perfectos (sin ruido)
-        if self._baseline_std < 1e-12:
-            self._baseline_std = 1e-12
+        #if self._baseline_std < 1e-12:
+        #    self._baseline_std = 1e-12
+        MIN_STD = cfg.Q_OUTLET * 1e-3   # 0.1% del caudal nominal (posible fix a los falsos positivos)
+        if self._baseline_std < MIN_STD:
+            self._baseline_std = MIN_STD
 
     def detect(self, t, Q_sensors):
         """Ejecuta la detección de fuga por balance de masa.
@@ -188,18 +191,19 @@ class NPWLocalizer:
                 baseline_std = np.std(dP_smooth[mask_baseline])
             else:
                 baseline_std = np.std(dP_smooth[:10])
-            if baseline_std < 1e-12:
-                baseline_std = 1e-12
+            
+            # Mínimo realista para no triggerear con la cola del transitorio
+            # numérico en casos sin ruido (trivial)
+            MIN_STD_P = 10.0
+            if baseline_std < MIN_STD_P:
+                baseline_std = MIN_STD_P
 
             # Umbral de arrival: caída negativa significativa
             arrival_threshold = -self.k_threshold * baseline_std
 
             # Buscar primer cruce por debajo del umbral
-            # Solo buscar después de t_detection si está disponible
-            if t_detection is not None:
-                search_mask = t >= t_detection
-            else:
-                search_mask = t >= t_baseline_end
+            # Siempre buscamos después del baseline para no recortar la onda física real
+            search_mask = t >= t_baseline_end
 
             candidates = np.where(
                 (dP_smooth < arrival_threshold) & search_mask
@@ -236,39 +240,51 @@ class NPWLocalizer:
         a = self.wave_speed
         estimates = []
 
-        # Para cada par de sensores adyacentes
-        for j in range(len(x_sensors) - 1):
-            t1 = arrival_times[j]      # sensor upstream
-            t2 = arrival_times[j + 1]  # sensor downstream
+        # 1. Encontrar qué sensor detectó primero (el más cercano a la fuga)
+        valid = [
+            (i, arrival_times[i], x_sensors[i])
+            for i in range(len(arrival_times))
+            if arrival_times[i] is not None
+        ]
 
-            if t1 is None or t2 is None:
-                continue
-
-            x_s1 = x_sensors[j]
-            x_s2 = x_sensors[j + 1]
-
-            x_est = (a * (t1 - t2) + x_s1 + x_s2) / 2.0
-
-            # Solo aceptar si la estimación cae entre ambos sensores
-            # (es decir, el par efectivamente bracketea la fuga)
-            margin = 0.1 * (x_s2 - x_s1)  # 10% de margen
-            if (x_s1 - margin) <= x_est <= (x_s2 + margin):
-                estimates.append(float(x_est))
-
-        if len(estimates) > 0:
-            x_leak_est = float(np.mean(estimates))
+        if not valid:
+            # Sin detecciones, asumimos la mitad del arreglo
+            x_leak_est = float(np.mean(x_sensors))
         else:
-            # Fallback: el sensor con arrival más temprano está más cerca
-            valid = [
-                (arrival_times[i], x_sensors[i])
-                for i in range(len(arrival_times))
-                if arrival_times[i] is not None
-            ]
-            if valid:
-                valid.sort(key=lambda pair: pair[0])
-                x_leak_est = float(valid[0][1])
+            # Ordenar por tiempo de llegada (de menor a mayor)
+            valid.sort(key=lambda item: item[1])
+            min_idx = valid[0][0]  # El índice del sensor "hit first"
+
+            # 2. Formar pares de sensores adyacentes que INCLUYAN al min_idx
+            candidate_pairs = []
+
+            # Par a la izquierda de min_idx
+            if min_idx > 0 and arrival_times[min_idx - 1] is not None:
+                j = min_idx - 1
+                t1, t2 = arrival_times[j], arrival_times[j + 1]
+                x_s1, x_s2 = x_sensors[j], x_sensors[j + 1]
+                delta_t = t1 - t2
+                x_est = (a * delta_t + x_s1 + x_s2) / 2.0
+                candidate_pairs.append({'abs_dt': abs(delta_t), 'x_est': x_est})
+
+            # Par a la derecha de min_idx
+            if min_idx < len(x_sensors) - 1 and arrival_times[min_idx + 1] is not None:
+                j = min_idx
+                t1, t2 = arrival_times[j], arrival_times[j + 1]
+                x_s1, x_s2 = x_sensors[j], x_sensors[j + 1]
+                delta_t = t1 - t2
+                x_est = (a * delta_t + x_s1 + x_s2) / 2.0
+                candidate_pairs.append({'abs_dt': abs(delta_t), 'x_est': x_est})
+
+            if candidate_pairs:
+                # 3. La física dicta que el par que 'bracketea' la fuga tendrá
+                # un menor |t1 - t2| que el par donde ambos sensores están del mismo lado.
+                best_pair = min(candidate_pairs, key=lambda p: p['abs_dt'])
+                x_leak_est = float(best_pair['x_est'])
+                estimates.append(x_leak_est)
             else:
-                x_leak_est = float(np.mean(x_sensors))
+                # Si por falta de datos el sensor min_idx no formó par, usamos su ubicación
+                x_leak_est = float(valid[0][2])
 
         return {
             'x_leak_est': x_leak_est,
@@ -283,7 +299,7 @@ class NPWLocalizer:
 # ═══════════════════════════════════════════════════════════════
 
 def run_mass_balance(scenario_id, noise_level='trivial', n_pressure_sensors=3,
-                     window_size=20, n_sigma=3.0, k_threshold=2.0):
+                     window_size=20, n_sigma=3.0, k_threshold=5.0):
     """Corre el baseline completo (detección + localización) para un escenario.
 
     Instrumentación:

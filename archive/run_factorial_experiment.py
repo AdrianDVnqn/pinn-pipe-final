@@ -170,6 +170,10 @@ def build_master_dataframe():
         
     df = pd.concat(dfs, ignore_index=True)
     
+    if 'n_pressure_sensors' in df.columns:
+        df['n_sensors'] = df['n_sensors'].fillna(df['n_pressure_sensors'])
+        df.drop(columns=['n_pressure_sensors'], inplace=True)
+        
     # Agregar columna noise_std_db (normalizada respecto a 500 Pa)
     df['noise_std_db'] = 20 * np.log10(np.clip(df['noise_std'], 1e-5, None) / 500.0)
     
@@ -294,8 +298,9 @@ def print_master_summary(agg_df, n_sensors=3):
     
     print("\nFactor de degradación (x_err muy_dificil / x_err trivial):")
     for m_key, m_name in methods.items():
-        val = agg_df[(agg_df['method'] == m_key) & (agg_df['n_sensors'] == n_sensors)]['degradation_factor'].iloc[0]
-        if pd.notna(val):
+        sub_df = agg_df[(agg_df['method'] == m_key) & (agg_df['n_sensors'] == n_sensors)]
+        if not sub_df.empty and pd.notna(sub_df['degradation_factor'].iloc[0]):
+            val = sub_df['degradation_factor'].iloc[0]
             print(f"  {m_name:<15}: {val:4.1f}x")
         else:
             print(f"  {m_name:<15}: N/A")
